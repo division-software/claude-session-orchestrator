@@ -35,7 +35,7 @@ const slug = (s: string) => s.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(
 
 /**
  * Make sure the project has its own folder on the machine: clone `repo` if it is missing,
- * or with `create` make it and `git init` it. Returns what was done, for the summary.
+ * or (when missing, or with `create`) make it and `git init` it. Returns what was done, for the summary.
  */
 async function ensureProjectDir(m: Machine, p: Project, create: boolean): Promise<string | undefined> {
   const dir = qpath(projectDir(m, p));
@@ -46,8 +46,7 @@ async function ensureProjectDir(m: Machine, p: Project, create: boolean): Promis
       .catch((e) => { throw new UserError(`Could not clone ${p.repo} on ${m.id}: ${(e as Error).message.slice(0, 200)}`); });
     return `Cloned ${p.repo}.`;
   }
-  if (!exists && !create) throw new UserError(`Project folder ${projectDir(m, p)} does not exist on ${m.id}. Use create=true to make it.`);
-  if (!create) return undefined;
+  if (exists && !create) return undefined;
   // A folder inside some other repo still gets its own: a project must never share a repo by accident.
   const top = await runOk(m, `cd ${dir} && test "$(git rev-parse --show-toplevel 2>/dev/null)" = "$(pwd -P)"`).then(() => true, () => false);
   if (exists && top) return undefined;
@@ -229,11 +228,11 @@ export function register(server: McpServer, ctx: Ctx) {
       };
     });
 
-  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. For a new project pass create=true: it gets its own folder and git repo (or a clone of repo), is registered, and the folder is pre-trusted in Claude Code so no trust prompt blocks the session.',
+  tool(server, ctx, 'session_start', 'Start a new Claude Code session in tmux for a project, always in the project\'s own folder (Remote Control on by default so it shows in the Claude app). The session is named after the project. Machine defaults to the project\'s machine. An unknown project name is a new project: it gets its own folder and git repo (or a clone of repo), is registered, and the folder is pre-trusted in Claude Code so no trust prompt blocks the session. It never falls back to another project\'s folder.',
     {
-      project: z.string().describe('Project id or spoken alias; with create=true, the new project\'s name'),
-      create: z.boolean().default(false).describe('New project: create its folder and git repo and register it'),
-      repo: z.string().optional().describe('With create=true: git URL to clone (or to set as origin)'),
+      project: z.string().describe('Project id or spoken alias, or a new project\'s name'),
+      create: z.boolean().default(false).describe('Also git init an existing folder that is not its own repo (new names and missing folders are always created)'),
+      repo: z.string().optional().describe('For a new project: git URL to clone (or to set as origin)'),
       machine: z.string().optional(),
       prompt: z.string().optional().describe('First message for the session'),
       remote_control: z.boolean().default(true),
@@ -242,12 +241,14 @@ export function register(server: McpServer, ctx: Ctx) {
     },
     async ({ project, create, repo, machine, prompt, remote_control, name, wait }) => {
       let p: Project | undefined;
-      try { p = findProject(ctx.cfg, project); } catch (e) { if (!create) throw e; }
+      try { p = findProject(ctx.cfg, project); } catch { /* new project: created below */ }
       if (p && repo && p.repo !== repo) throw new UserError(`${p.id} already exists${p.repo ? ` with repo ${p.repo}` : ''}; edit projects.yaml to change it.`);
       const mid = machine ?? p?.machine ?? (ctx.cfg.machines.find((x) => x.local) ?? ctx.cfg.machines[0])?.id;
       if (!mid) throw new UserError('No machines configured.');
       const m = findMachine(ctx.cfg, mid);
       const live = (await tmux.snapshot(m)).map((s) => s.name); // also fails fast when the machine is unreachable
+      // "smart_home" must reuse smart-home, not register a second project with the same id.
+      if (!p) p = ctx.cfg.projects.find((x) => x.id === slug(project));
       const isNew = !p;
       if (!p) {
         const id = slug(project);
