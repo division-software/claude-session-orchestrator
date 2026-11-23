@@ -3,6 +3,7 @@ import { test, before, after } from 'node:test';
 import assert from 'node:assert/strict';
 import { execSync } from 'node:child_process';
 import { chmodSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, statSync, writeFileSync } from 'node:fs';
+import { randomUUID } from 'node:crypto';
 import { createServer, type Server } from 'node:http';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -17,6 +18,9 @@ import { machineToken } from '../src/auth.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), 'orch-'));
 process.env.TMUX_TMPDIR = tmp; // private tmux server, inherited by every child process
+// Inside tmux, $TMUX names the user's own socket and wins over TMUX_TMPDIR: drop it so the tests (and their kill-server) never touch it.
+delete process.env.TMUX;
+delete process.env.TMUX_PANE;
 process.env.BRAIN_DIR = join(tmp, 'brain');
 process.env.CONFIG_DIR = join(tmp, 'config'); // project_create writes projects.yaml here
 mkdirSync(join(tmp, 'config'));
@@ -163,6 +167,14 @@ test('session lifecycle over MCP + hooks', async () => {
   const name: string = start.session;
   assert.equal(name, 'cc-demo'); // named after the project
   await wait(300);
+
+  // The tmux server must not live in our own cgroup, or restarting the orchestrator service would kill it.
+  let scoped = true;
+  try { execSync('systemd-run --user --scope --quiet true', { stdio: 'ignore' }); } catch { scoped = false; }
+  if (scoped) {
+    const cg = (pid: string | number) => readFileSync(`/proc/${pid}/cgroup`, 'utf8');
+    assert.notEqual(cg(execSync("tmux display -p '#{pid}'").toString().trim()), cg(process.pid));
+  }
 
   let read = await call('session_read', { session: 'demo', mode: 'tail' });
   assert.match(read.text, new RegExp(`args: --name demo --remote-control demo --session-id [0-9a-f-]{36} first 'task'`));
@@ -441,4 +453,98 @@ test('new project: own folder and git repo, project-named sessions, shared histo
   assert.ok(!cfg.projects.some((p) => p.id === 'evil')); // failed setup registers nothing
 
   for (const s of ['cc-side-quest', 'cc-side-quest-3', 'cc-nested', 'cc-cloned']) await call('session_stop', { session: s, mode: 'kill', confirm: true });
+});
+
+test('adopts Claude Code panes started outside the orchestrator (tmux, any session name)', async () => {
+  // node2 and mac are both local here and would see the same tmux server; scan only node2.
+  const all = cfg.machines;
+  cfg.machines = all.filter((m) => m.id === 'node2');
+  const sid = randomUUID();
+  const proj = join(tmp, 'proj', 'demo');
+  mkdirSync(join(tmp, 'elsewhere'), { recursive: true });
+  execSync(`tmux new-session -d -s mywork -c ${proj}/ '${FAKE} --session-id ${sid}'`);
+  execSync(`tmux new-session -d -s scratch -c ${join(tmp, 'elsewhere')} '${FAKE}'`);
+  execSync(`tmux new-session -d -s plain -c ${proj} 'cat'`); // not Claude Code: ignored
+  try {
+    await wait(300);
+    assert.equal(db.sessions().filter((r) => r.target).length, 0, 'no background scan');
+
+    const list = await call('session_list');
+    const adopted = list.sessions.filter((s: { adopted: boolean }) => s.adopted);
+    assert.equal(adopted.length, 2);
+    // Their tmux sessions were renamed to cc-<name> (so the hooks report for them); the row name follows.
+    const a = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'cc-mywork');
+    const u = adopted.find((s: { tmux_session: string }) => s.tmux_session === 'cc-scratch');
+    assert.equal(a.project, 'demo');
+    assert.equal(a.name, 'cc-mywork'); // the project is not part of an adopted name
+    assert.equal(u.name, 'cc-scratch');
+    assert.equal(u.project, 'unassigned');
+    assert.match(list.summary, /unassigned \(tmux cc-scratch\) on node2/);
+    execSync(`tmux has-session -t '=cc-mywork'`);
+    assert.throws(() => execSync(`tmux has-session -t '=mywork'`, { stdio: 'ignore' }));
+    assert.equal(db.session('cc-mywork')!.tmux_orig, 'mywork');
+
+    // The renamed session shows up as a cc-* tmux session on the next scan: still one row, never a native duplicate.
+    for (let i = 0; i < 2; i++) {
+      const again = await call('session_list');
+      assert.equal(again.sessions.filter((s: { adopted: boolean }) => s.adopted).length, 2, 'adopting twice does not duplicate');
+      assert.equal(again.sessions.filter((s: { name: string }) => s.name === 'cc-mywork').length, 1);
+    }
+    assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork' && !r.target).length, 0, 'no native row under the renamed name');
+
+    // notify.sh reports session=<tmux name>: that is the adopted row now.
+    const hook = (session: string, body: unknown) => fetch(`${base}/events?session=${session}&machine=node2`, {
+      method: 'POST', headers: { authorization: `Bearer ${machineToken('secret', 'node2')}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+    });
+    assert.equal((await hook('cc-mywork', { hook_event_name: 'Notification', message: 'Claude needs your permission to use Bash' })).status, 204);
+    assert.equal(db.session('cc-mywork')!.status, 'waiting_approval');
+    assert.ok(db.session('cc-mywork')!.target, 'still the adopted row');
+    const tHook = Date.now();
+    assert.equal((await hook('cc-mywork', { hook_event_name: 'Stop' })).status, 204);
+    assert.equal(db.session('cc-mywork')!.status, 'idle');
+    // A hook event bumps last_activity even though tmux saw no client input.
+    const la = (await call('session_list')).sessions.find((x: { name: string }) => x.name === 'cc-mywork').last_activity;
+    assert.ok(Date.parse(la) >= tHook - 1000, `last_activity ${la} is current`);
+    assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork').length, 1);
+
+    // Works like a native session: send (exact reply from transcript via --session-id), read, approve, stop.
+    const r = await call('session_send', { session: a.name, message: 'hello' });
+    assert.ok(!r.err, r.summary);
+    assert.equal(r.reply, 'Done with hello. All good.');
+    assert.equal(r.done, true);
+    assert.equal(db.session(a.name)!.status, 'idle', 'no hooks: idle inferred from the pane');
+    assert.match((await call('session_read', { session: a.name, mode: 'tail' })).text, /Update\(src\/hello\.ts\)/);
+
+    await call('session_send', { session: u.name, message: 'ask', wait: 0 });
+    await wait(500);
+    const ap = await call('session_approve', { session: u.name, choice: 'yes', wait: 0 });
+    assert.ok(!ap.err, ap.summary);
+
+    assert.match((await call('session_stop', { session: u.name, mode: 'kill' })).summary, /needs confirm=true/);
+    assert.ok(!(await call('session_stop', { session: u.name, mode: 'kill', confirm: true })).err);
+    assert.equal(db.session(u.name)!.status, 'stopped');
+    assert.throws(() => execSync(`tmux has-session -t '=cc-scratch'`, { stdio: 'ignore' })); // its only pane closed
+
+    // Claude exits to a shell: the session is stopped and nothing is typed into the shell.
+    execSync(`tmux respawn-pane -k -t '=cc-mywork:' 'cat'`);
+    await wait(300);
+    const gone = await call('session_send', { session: a.name, message: 'INJECTED', wait: 0 });
+    assert.ok(gone.err);
+    assert.doesNotMatch(execSync(`tmux capture-pane -p -t '=cc-mywork:'`).toString(), /INJECTED/);
+    assert.equal(db.session(a.name)!.status, 'stopped');
+    assert.ok(!(await call('session_delete', { session: a.name, confirm: true })).err);
+    execSync(`tmux has-session -t '=cc-mywork'`); // deleting a stopped adopted session leaves the user's pane alone
+
+    // An unknown name triggers a scan, and the tmux session name works as a name.
+    execSync(`tmux respawn-pane -k -t '=cc-mywork:' '${FAKE}'`);
+    await wait(300);
+    const t = await call('session_read', { session: 'mywork', mode: 'tail' });
+    assert.ok(!t.err, t.summary);
+    // Its row was deleted and its tmux session is cc-* now, so it is tracked by name like any cc-* session: one live row.
+    assert.equal(db.sessions().filter((r) => r.name === 'cc-mywork' && r.status !== 'stopped').length, 1);
+    assert.ok((await call('session_read', { session: 'no-such-thing' })).err);
+  } finally {
+    cfg.machines = all;
+    for (const s of ['mywork', 'cc-mywork', 'scratch', 'cc-scratch', 'plain']) execSync(`tmux kill-session -t '=${s}' 2>/dev/null || true`);
+  }
 });

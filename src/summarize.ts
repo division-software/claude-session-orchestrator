@@ -10,7 +10,7 @@ const BOX = /^[\s╭╮╰╯│─┌┐└┘├┤]+$/u;
 export const clean = (raw: string) =>
   raw.replace(ANSI, '').split('\n').map((l) => l.replace(/\s+$/, '')).filter((l) => l && !BOX.test(l));
 
-const APPROVAL = /Do you want to (proceed|make this edit|create|run|allow)|❯\s*1\.\s*Yes|Allow .*\?/i;
+const APPROVAL = /Do you want to (proceed|make this edit|create|run|allow)|Do you trust the files|trust this folder|❯\s*1\.\s*Yes|Allow .*\?/i;
 
 export function detectStatus(raw: string): Status | undefined {
   const lines = clean(raw).slice(-25).join('\n');

@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
+import { adoptPanes, projectDirs } from '../adopt.ts';
 import { findMachine, findProject, projectDir, saveProject, UserError, type Machine, type Project } from '../config.ts';
 import { injectContext, logSession } from './memory.ts';
 import type { SessionRow } from '../db.ts';
@@ -68,19 +69,36 @@ async function trustFolder(m: Machine, dir: string): Promise<string | undefined>
     .then(() => undefined, () => `Could not pre-trust the folder (needs jq on ${m.id}); answer the first prompt with session_approve.`);
 }
 
+/** Last activity: the newest of what tmux saw and the row's last status change (hook events and scans). */
+export const lastActivity = (tmuxMs: number, statusSince: number | null | undefined) => Math.max(tmuxMs || 0, statusSince ?? 0);
+
 export interface LiveSession extends SessionRow { reachable: boolean; last_activity: number | null }
 
-/** Reconcile tmux reality with the DB: new sessions get adopted, vanished ones become stopped. */
-export async function refresh(ctx: Ctx, machine?: string): Promise<LiveSession[]> {
+/**
+ * Reconcile tmux reality with the DB: new cc-* sessions get adopted, vanished ones become stopped.
+ * Claude Code panes started outside the orchestrator (any tmux session name) are only adopted when
+ * `adopt` is set; panes already adopted are always checked, so they can be marked stopped.
+ */
+export async function refresh(ctx: Ctx, machine?: string, adopt = false): Promise<LiveSession[]> {
   const ms = machine ? [findMachine(ctx.cfg, machine)] : ctx.cfg.machines;
   const snaps = await Promise.all(ms.map(async (m) => {
-    try { return { m, live: await tmux.snapshot(m) }; } catch { return { m, live: null }; }
+    const hasAdopted = ctx.db.sessions().some((r) => r.machine === m.id && r.target && r.status !== 'stopped');
+    try {
+      const [live, found] = await Promise.all([tmux.snapshot(m), adopt || hasAdopted ? tmux.discover(m, projectDirs(ctx.cfg, m)) : null]);
+      return { m, live, found };
+    } catch { return { m, live: null, found: null }; }
   }));
   const out: LiveSession[] = [];
-  for (const { m, live } of snaps) {
-    const rows = new Map(ctx.db.sessions().filter((r) => r.machine === m.id).map((r) => [r.name, r]));
+  for (const { m, live, found } of snaps) {
+    if (live && found && adopt) {
+      await adoptPanes(ctx.cfg, ctx.db, m, found, { rename: (from, to) => tmux.renameSession(m, from, to), taken: new Set(live.map((s) => s.name)) });
+    }
+    const mine = ctx.db.sessions().filter((r) => r.machine === m.id);
+    const rows = new Map(mine.filter((r) => !r.target).map((r) => [r.name, r]));
+    const adoptedNames = new Set(mine.filter((r) => r.target).map((r) => r.name));
     if (live) {
       for (const s of live) {
+        if (adoptedNames.has(s.name)) continue; // an adopted session renamed to cc-<name>: tracked by its pane below, never a second row
         const owner = ctx.db.session(s.name)?.machine;
         if (owner && owner !== m.id) continue; // same name already tracked on another machine
         if (!rows.has(s.name)) {
@@ -91,29 +109,60 @@ export async function refresh(ctx: Ctx, machine?: string): Promise<LiveSession[]
         const seen = detectStatus(s.pane);
         // Pane regex is the fallback for missed hooks; it only overrides when it sees something definite.
         if (seen && seen !== row.status) ctx.db.setStatus(s.name, seen, row.last_message);
-        out.push({ ...ctx.db.session(s.name)!, reachable: true, last_activity: s.activity });
+        { const r = ctx.db.session(s.name)!; out.push({ ...r, reachable: true, last_activity: lastActivity(s.activity, r.status_since) }); }
         rows.delete(s.name);
       }
       for (const r of rows.values()) {
         if (r.status !== 'stopped') ctx.db.setStatus(r.name, 'stopped');
       }
+      // Adopted panes: alive while Claude Code still runs in the pane.
+      for (const r of mine.filter((x) => x.target && x.status !== 'stopped')) {
+        const p = found?.panes.find((x) => x.id === r.target);
+        if (!p) { ctx.db.setStatus(r.name, 'stopped'); continue; }
+        // Re-evaluated every scan from the process args and the settings on the machine.
+        if (p.remote_control !== r.remote_control) ctx.db.setRemoteControl(r.name, p.remote_control);
+        const seen = detectStatus(p.pane);
+        if (seen && seen !== r.status) ctx.db.setStatus(r.name, seen, r.last_message);
+        // No hooks reach adopted sessions: a turn that no longer shows "esc to interrupt" has ended.
+        else if (!seen && (r.status === 'working' || r.status === 'waiting_approval') && Date.now() - r.status_since > 5000) ctx.db.setStatus(r.name, 'idle');
+        { const cur = ctx.db.session(r.name)!; out.push({ ...cur, reachable: true, last_activity: lastActivity(p.activity, cur.status_since) }); }
+      }
     } else {
-      for (const r of rows.values()) if (r.status !== 'stopped') out.push({ ...r, reachable: false, last_activity: null });
+      for (const r of mine) if (r.status !== 'stopped') out.push({ ...r, reachable: false, last_activity: null });
     }
   }
   return out;
 }
 
-/** Accept a full session name or a project id/alias that has exactly one live session. */
-export function resolve(ctx: Ctx, name: string): SessionRow & { m: ReturnType<typeof findMachine> } {
+/** A session by full name, tmux session name (adopted ones), or project id/alias with exactly one live session. */
+function lookup(ctx: Ctx, name: string): SessionRow | undefined {
   const n = name.trim().toLowerCase();
-  let row = ctx.db.session(n) ?? ctx.db.session(`cc-${n}`);
-  if (!row) {
+  const row = ctx.db.session(n) ?? ctx.db.session(`cc-${n}`);
+  if (row) return row;
+  const live = ctx.db.sessions().filter((r) => r.status !== 'stopped');
+  let cands = live.filter((r) => r.tmux_session?.toLowerCase() === n);
+  if (!cands.length) {
     let pid: string | undefined;
     try { pid = findProject(ctx.cfg, n).id; } catch { /* not a project name */ }
-    const cands = ctx.db.sessions().filter((r) => r.status !== 'stopped' && (r.project === pid || r.project === n));
-    if (cands.length > 1) throw new UserError(`"${name}" matches ${cands.length} sessions: ${cands.map((c) => c.name).join(', ')}. Say which one.`);
-    row = cands[0];
+    cands = live.filter((r) => r.project === pid || r.project === n);
+  }
+  if (cands.length > 1) throw new UserError(`"${name}" matches ${cands.length} sessions: ${cands.map((c) => c.name).join(', ')}. Say which one.`);
+  return cands[0];
+}
+
+/**
+ * Accept a full session name, a tmux session name or a project id/alias that has exactly one live session.
+ * A name we do not know triggers a scan for Claude Code sessions started outside the orchestrator.
+ */
+export async function resolve(ctx: Ctx, name: string): Promise<SessionRow & { m: ReturnType<typeof findMachine> }> {
+  let row = lookup(ctx, name);
+  if (!row) {
+    await refresh(ctx, undefined, true);
+    row = lookup(ctx, name);
+  } else if (row.target && row.status !== 'stopped') {
+    // Adopted pane: Claude Code may have exited to a shell since the last look. Never type into that.
+    await refresh(ctx, row.machine);
+    row = ctx.db.session(row.name)!;
   }
   if (!row || row.status === 'stopped') throw new UserError(`No running session called "${name}".`);
   return { ...row, m: findMachine(ctx.cfg, row.machine) };
@@ -137,7 +186,7 @@ export async function writeLog(ctx: Ctx, s: SessionRow, m: Machine, note?: strin
   try {
     let text = note ?? '';
     const tr = await readTranscript(m, s.transcript, s.claude_id).catch(() => null);
-    const raw = tr ? null : await tmux.capture(m, s.name, 400).catch(() => null);
+    const raw = tr ? null : await tmux.capture(m, s, 400).catch(() => null);
     if (tr) {
       const t = lastTurn(tr);
       const reply = t.reply.length > 600 ? `${t.reply.slice(0, 600)}…` : t.reply;
@@ -170,12 +219,15 @@ async function waitTurn(ctx: Ctx, name: string, m: Machine, since: number, secon
     await sleep(2000);
     const row = ctx.db.session(name);
     if (row && DONE.includes(row.status) && row.status_since > since) return true;
-    const pane = await tmux.capture(m, name, 30).catch(() => null);
+    const pane = await tmux.capture(m, row ?? name, 30).catch(() => null);
     if (pane === null) return true; // session is gone
     const seen = detectStatus(pane);
     if (seen === 'waiting_approval') { ctx.db.setStatus(name, 'waiting_approval'); return true; }
     quiet = seen === 'working' ? 0 : quiet + 1;
-    if (quiet >= 2 && Date.now() - since > 4000) return true;
+    if (quiet >= 2 && Date.now() - since > 4000) {
+      if (row?.target && row.status === 'working') ctx.db.setStatus(name, 'idle'); // adopted: no Stop hook
+      return true;
+    }
   }
   return false;
 }
@@ -194,10 +246,10 @@ async function report(ctx: Ctx, name: string, m: Machine, done = true) {
     return {
       summary: `${head}${first ? ` ${first}` : ''}${changed}${!done ? ' Call session_wait to keep waiting.' : ''}`,
       status: row.status, done, reply: t.reply || null, prompt: t.prompt, actions: t.actions, files_changed: t.files,
-      ...(row.status === 'waiting_approval' && { waiting_for: summarize(await tmux.capture(m, name, 30).catch(() => '')).waiting_for }),
+      ...(row.status === 'waiting_approval' && { waiting_for: summarize(await tmux.capture(m, row, 30).catch(() => '')).waiting_for }),
     };
   }
-  const sum = summarize(await tmux.capture(m, name, 200).catch(() => ''));
+  const sum = summarize(await tmux.capture(m, row, 200).catch(() => ''));
   const parts = [sum.waiting_for && `Waiting: ${sum.waiting_for}`, sum.last_action && `Last: ${sum.last_action}`,
     sum.last_error && `Error: ${sum.last_error}`].filter(Boolean);
   return { summary: `${label} is ${status}.${parts.length ? ` ${parts.join('. ')}.` : ''}${!done ? ' Call session_wait to keep waiting.' : ''}`, status: row.status, done, ...sum };
@@ -211,20 +263,22 @@ async function sendAndWait(ctx: Ctx, s: SessionRow & { m: Machine }, wait: numbe
 
 export function line(s: LiveSession) {
   const where = s.reachable ? '' : ' (machine unreachable, last known)';
-  return `${s.project} on ${s.machine}: ${SPOKEN[s.status]} since ${ago(s.status_since)}${where}.`;
+  const label = s.project === 'unassigned' && s.tmux_session ? `unassigned (tmux ${s.tmux_session})` : s.project;
+  return `${label} on ${s.machine}: ${SPOKEN[s.status]} since ${ago(s.status_since)}${where}.`;
 }
 
 export function register(server: McpServer, ctx: Ctx) {
-  tool(server, ctx, 'session_list', 'List Claude Code sessions with project, machine, status, last activity and Remote Control flag.',
+  tool(server, ctx, 'session_list', 'List Claude Code sessions with project, machine, status, last activity and Remote Control flag. Also adopts Claude Code sessions running in tmux that were started outside the orchestrator (project "unassigned" if no project folder matches).',
     { machine: z.string().optional() },
     async ({ machine }) => {
-      const ss = await refresh(ctx, machine);
+      const ss = await refresh(ctx, machine, true);
       return {
         summary: ss.length ? `${ss.length} sessions. ${ss.map(line).join(' ')}` : 'No sessions running.',
         sessions: ss.map((s) => ({
           name: s.name, project: s.project, machine: s.machine, status: s.status,
           last_activity: s.last_activity && new Date(s.last_activity).toISOString(),
-          remote_control: !!s.remote_control, machine_reachable: s.reachable,
+          remote_control: s.remote_control < 0 ? null : !!s.remote_control, machine_reachable: s.reachable,
+          adopted: !!s.target, ...(s.tmux_session && { tmux_session: s.tmux_session }),
         })),
       };
     });
@@ -288,9 +342,9 @@ export function register(server: McpServer, ctx: Ctx) {
       lines: z.number().int().min(1).max(500).default(60),
     },
     async ({ session, mode, lines }) => {
-      const s = resolve(ctx, session);
+      const s = await resolve(ctx, session);
       if (mode === 'reply') return report(ctx, s.name, s.m, ctx.db.session(s.name)!.status !== 'working');
-      const raw = await tmux.capture(s.m, s.name, Math.max(lines, 200));
+      const raw = await tmux.capture(s.m, s, Math.max(lines, 200));
       if (mode === 'tail') return { summary: `Last ${lines} lines of ${s.name}.`, text: tail(raw, lines) };
       const sum = summarize(raw);
       const parts = [
@@ -305,9 +359,9 @@ export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'session_send', 'Send a message to a session (typed, then Enter) and, by default, wait for its reply.',
     { session: z.string(), message: z.string().min(1), wait: WAIT(45) },
     async ({ session, message, wait }) => {
-      const s = resolve(ctx, session);
+      const s = await resolve(ctx, session);
       const sent = Date.now();
-      await tmux.sendText(s.m, s.name, message);
+      await tmux.sendText(s.m, s, message);
       ctx.db.setStatus(s.name, 'working');
       return (await sendAndWait(ctx, s, wait, sent)) ?? { summary: `Sent to ${s.project}.` };
     });
@@ -315,7 +369,7 @@ export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'session_wait', 'Wait for a working session to finish its turn (or ask for something), then return its reply.',
     { session: z.string(), seconds: WAIT(60) },
     async ({ session, seconds }) => {
-      const s = resolve(ctx, session);
+      const s = await resolve(ctx, session);
       const done = s.status !== 'working' || await waitTurn(ctx, s.name, s.m, s.status_since, seconds);
       return report(ctx, s.name, s.m, done);
     });
@@ -323,15 +377,15 @@ export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'session_approve', 'Answer a pending permission prompt: yes, always (don\'t ask again), or no.',
     { session: z.string(), choice: z.enum(['yes', 'no', 'always']), wait: WAIT(30) },
     async ({ session, choice, wait }) => {
-      const s = resolve(ctx, session);
-      const pane = await tmux.capture(s.m, s.name, 30);
+      const s = await resolve(ctx, session);
+      const pane = await tmux.capture(s.m, s, 30);
       if (s.status !== 'waiting_approval' && detectStatus(pane) !== 'waiting_approval') {
         throw new UserError(`${s.project} is not waiting for approval; it is ${SPOKEN[s.status]}.`);
       }
       // Read the menu on screen; if none is visible, fall back to the tool-permission layout.
       const keys = menuKeys(pane, choice) ?? [{ yes: '1', always: '2', no: 'Escape' }[choice]];
       const sent = Date.now();
-      await tmux.sendKeys(s.m, s.name, ...keys);
+      await tmux.sendKeys(s.m, s, ...keys);
       ctx.db.setStatus(s.name, choice === 'no' ? 'waiting_input' : 'working');
       const turn = choice === 'no' ? null : await sendAndWait(ctx, s, wait, sent);
       return turn ? { ...turn, summary: `Answered ${choice}. ${turn.summary}` } : { summary: `Answered ${choice} for ${s.project}.` };
@@ -340,8 +394,8 @@ export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'session_interrupt', 'Press Esc in a session: stops the current work, keeps the session open.',
     { session: z.string() },
     async ({ session }) => {
-      const s = resolve(ctx, session);
-      await tmux.sendKeys(s.m, s.name, 'Escape');
+      const s = await resolve(ctx, session);
+      await tmux.sendKeys(s.m, s, 'Escape');
       ctx.db.setStatus(s.name, 'waiting_input');
       return { summary: `Interrupted ${s.project}.` };
     });
@@ -349,13 +403,13 @@ export function register(server: McpServer, ctx: Ctx) {
   tool(server, ctx, 'session_stop', 'Stop a session. graceful sends /exit; kill closes the tmux session and needs confirm=true.',
     { session: z.string(), mode: z.enum(['graceful', 'kill']).default('graceful'), confirm: z.boolean().optional() },
     async ({ session, mode, confirm }) => {
-      const s = resolve(ctx, session);
+      const s = await resolve(ctx, session);
       if (mode === 'kill' && confirm !== true) throw new UserError(`Killing ${s.name} needs confirm=true. Ask the user first.`);
       await writeLog(ctx, s, s.m); // while the pane still exists
       // Mark stopped first so the SessionEnd hook that /exit triggers does not log a second time.
       ctx.db.setStatus(s.name, 'stopped');
-      if (mode === 'kill') await tmux.kill(s.m, s.name);
-      else await tmux.sendText(s.m, s.name, '/exit');
+      if (mode === 'kill') await tmux.kill(s.m, s);
+      else await tmux.sendText(s.m, s, '/exit');
       return { summary: `${mode === 'kill' ? 'Killed' : 'Stopped'} ${s.project} on ${s.machine}.` };
     });
 
@@ -379,11 +433,12 @@ export function register(server: McpServer, ctx: Ctx) {
       for (const r of rows) {
         const m = ctx.cfg.machines.find((x) => x.id === r.machine);
         if (m) {
-          const live = await tmux.capture(m, r.name, 1).then(() => true, () => false);
+          // An adopted session that already stopped leaves the user's shell in that pane: never close it.
+          const live = !(r.target && r.status === 'stopped') && await tmux.capture(m, r, 1).then(() => true, () => false);
           if (live) {
             await writeLog(ctx, r, m);
             ctx.db.setStatus(r.name, 'stopped'); // so the SessionEnd hook does not log twice
-            await tmux.kill(m, r.name);
+            await tmux.kill(m, r);
             killed++;
           }
           if (delete_transcript && await deleteTranscript(m, r.transcript, r.claude_id).catch(() => false)) transcripts++;

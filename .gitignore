@@ -5,3 +5,9 @@ config/*.yaml
 !config/*.example.yaml
 *.db-*
 dist/
+.env.*
+!.env.example
+.wrangler/
+*.bak*
+config/*.yaml*
+!config/*.example.yaml
