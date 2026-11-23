@@ -73,7 +73,9 @@ function startAgent(token) {
   writeFileSync(join(tmp, 'cfg', 'machines.yaml'), `machines:\n  - id: hub\n    local: true\n    projects_root: ${join(tmp, 'proj')}\n    claude_cmd: "sh -c 'echo fake-claude; cat' x"\n`);
   writeFileSync(join(tmp, 'cfg', 'projects.yaml'), 'projects:\n  - {id: demo, machine: hub}\n');
   const env = { ...process.env, CONFIG_DIR: join(tmp, 'cfg'), DB_PATH: join(tmp, 'a.db'), BRAIN_DIR: join(tmp, 'brain'), TMUX_TMPDIR: tmp,
-    PORT: '8799', MCP_TOKEN: 'local-only', EVENTS_TOKEN: 'x'.repeat(32), ORCH_CLOUD_URL: 'ws://127.0.0.1:8788/agent', ORCH_AGENT_TOKEN: token };
+    PORT: '8799', MCP_TOKEN: 'local-only', EVENTS_TOKEN: 'x'.repeat(32), ORCH_CLOUD_URL: 'ws://127.0.0.1:8788/agent', ORCH_AGENT_TOKEN: token,
+    HOST: '127.0.0.1', CSO_TMUX_SCOPE: 'cso-test-tmux', REAP_MINUTES: '0' };
+  delete env.TMUX; delete env.WHATSAPP_ENV_FILE; // never the real tmux server, nor real WhatsApp
   const p = spawn('node', ['src/server.ts'], { cwd: REPO, env, stdio: ['ignore', 'pipe', 'pipe'] });
   let log = ''; p.stdout.on('data', (d) => (log += d)); p.stderr.on('data', (d) => (log += d));
   return { p, log: () => log, tmp };
@@ -88,12 +90,12 @@ assert.equal((await fetch(`${BASE}/agent`, { headers: { authorization: 'Bearer c
 const alice = await dashboardToken('alice', 'e2e laptop');
 const agent = startAgent(alice.token);
 for (let i = 0; i < 40 && !agent.log().includes('cloud: connected'); i++) await wait(250);
-assert.match(agent.log(), /cloud: connected to 127\.0\.0\.1:8788, 24 tools advertised/);
-assert.match(await (await alice.go('/dashboard')).text(), /online since .* 24 tools advertised/);
+assert.match(agent.log(), /cloud: connected to 127\.0\.0\.1:8788, 27 tools advertised/);
+assert.match(await (await alice.go('/dashboard')).text(), /online since .* 27 tools advertised/);
 
 const a = await mcpLogin('alice');
 const tools = (await a.listTools()).tools;
-assert.equal(tools.length, 24);
+assert.equal(tools.length, 27);
 for (const t of tools) assert.ok(t.annotations?.title && typeof t.annotations.readOnlyHint === 'boolean' && typeof t.annotations.destructiveHint === 'boolean', `annotations on ${t.name}`);
 assert.equal(tools.find((t) => t.name === 'session_stop').annotations.destructiveHint, true);
 assert.equal(tools.find((t) => t.name === 'overview').annotations.readOnlyHint, true);

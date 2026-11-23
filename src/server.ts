@@ -2,7 +2,8 @@ import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 import { createServer, type IncomingMessage, type ServerResponse } from 'node:http';
 import { accessJwtOk, machineTokenOk, tokenOk } from './auth.ts';
-import { connectCloud } from './cloud.ts';
+import { cloudLink, connectCloud } from './cloud.ts';
+import { startReaper } from './reaper.ts';
 import { loadConfig } from './config.ts';
 import { Db } from './db.ts';
 import type { Ctx } from './tools/common.ts';
@@ -11,10 +12,11 @@ import * as llm from './tools/llm.ts';
 import * as machines from './tools/machines.ts';
 import * as memory from './tools/memory.ts';
 import * as sessions from './tools/sessions.ts';
+import * as whatsapp from './tools/whatsapp.ts';
 
 export function mcpServer(ctx: Ctx) {
   const server = new McpServer({ name: 'session-orchestrator', version: '1.0.0' });
-  for (const mod of [machines, sessions, events, memory, llm]) mod.register(server, ctx);
+  for (const mod of [machines, sessions, events, memory, llm, whatsapp]) mod.register(server, ctx);
   return server;
 }
 
@@ -58,7 +60,10 @@ export function app(ctx: Ctx, eventsToken = process.env.EVENTS_TOKEN, mcpToken =
         const code = events.ingest(ctx, url.searchParams.get('session') ?? '', machine, await readJson(req));
         res.writeHead(code).end();
       } else if (url.pathname === '/health') {
-        res.writeHead(200, { 'content-type': 'text/plain' }).end('ok');
+        // Unhealthy = needs a restart: the database fails, or the cloud link has been down for 5 minutes.
+        ctx.db.db.prepare('SELECT 1').get();
+        const down = cloudLink.enabled && !cloudLink.up && Date.now() - cloudLink.since > 5 * 60_000;
+        res.writeHead(down ? 503 : 200, { 'content-type': 'text/plain' }).end(down ? 'cloud link down' : 'ok');
       } else {
         res.writeHead(404).end();
       }
@@ -79,6 +84,7 @@ export async function main() {
   for (const host of (process.env.HOST ?? '127.0.0.1').split(',').map((h) => h.trim()).filter(Boolean)) {
     app(ctx).listen(port, host, () => console.log(`session-orchestrator on http://${host}:${port}/mcp`));
   }
+  startReaper(ctx);
   // Agent mode for the hosted service: dial out and serve tool calls for the signed-in owner.
   if (process.env.ORCH_CLOUD_URL && process.env.ORCH_AGENT_TOKEN) {
     await connectCloud(() => mcpServer(ctx), process.env.ORCH_CLOUD_URL, process.env.ORCH_AGENT_TOKEN);

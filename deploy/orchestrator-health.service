@@ -1,0 +1,6 @@
+[Unit]
+Description=Restart the Session Orchestrator if its /health check fails
+
+[Service]
+Type=oneshot
+ExecStart=%h/mcp-claude-session/deploy/healthcheck.sh session-orchestrator 8787

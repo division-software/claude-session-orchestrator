@@ -13,6 +13,7 @@ export interface SessionRow {
   claude_id: string | null;   // Claude Code session id (we pass --session-id, or a hook reports it)
   transcript: string | null;  // transcript path reported by a hook
   created: number | null;     // when the session started (null for rows from before this column)
+  keep: number;               // 1 = never auto-stopped by the idle cleanup
 }
 
 export class Db {
@@ -36,7 +37,7 @@ export class Db {
         args TEXT NOT NULL, ok INTEGER NOT NULL, error TEXT);
     `);
     // Columns added after the first release; ALTER fails harmlessly when they already exist.
-    for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER']) {
+    for (const col of ['claude_id TEXT', 'transcript TEXT', 'created INTEGER', 'keep INTEGER NOT NULL DEFAULT 0']) {
       try { this.db.exec(`ALTER TABLE sessions ADD COLUMN ${col}`); } catch { /* already there */ }
     }
   }
@@ -52,7 +53,7 @@ export class Db {
       .run(claudeId, transcript, name);
   }
 
-  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript' | 'created'>) {
+  upsertSession(s: Omit<SessionRow, 'status_since' | 'last_message' | 'claude_id' | 'transcript' | 'created' | 'keep'>) {
     const now = Date.now();
     this.db.prepare(`INSERT INTO sessions (name, machine, project, status, remote_control, status_since, created)
       VALUES (?, ?, ?, ?, ?, ?, ?) ON CONFLICT(name) DO UPDATE SET machine = excluded.machine, project = excluded.project,
@@ -65,6 +66,10 @@ export class Db {
   projectSessions(project: string) {
     return this.db.prepare(`SELECT * FROM sessions WHERE project = ? ORDER BY COALESCE(created, status_since) DESC`)
       .all(project) as unknown as SessionRow[];
+  }
+
+  setKeep(name: string, keep: boolean) {
+    this.db.prepare(`UPDATE sessions SET keep = ? WHERE name = ?`).run(keep ? 1 : 0, name);
   }
 
   setStatus(name: string, status: Status, message: string | null = null) {

@@ -26,7 +26,7 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
                                           └───── hooks POST /events (Bearer EVENTS_TOKEN) ─────┘
 ```
 
-## Tools (26)
+## Tools (27, plus 3 WhatsApp tools when configured)
 
 | Tool | What it does |
 | --- | --- |
@@ -41,7 +41,9 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
 | `session_wait(session, seconds=60)` | Waits for a working session to finish its turn, then returns its reply |
 | `session_approve(session, yes\|no\|always, wait=30)` | Answers the menu on screen (tool permissions, trust dialogs) and waits for what happens next |
 | `session_interrupt(session)` / `session_stop(session, graceful\|kill, confirm?)` | Esc / `/exit`, or kill (kill needs `confirm=true`) |
+| `session_keep(session, keep=true)` | Exempt a session from the idle cleanup (sessions idle 48 h, or 2 h while RAM is low, are stopped; `session_send` resumes them) |
 | `session_delete(session \| all_stopped, delete_transcript?, confirm)` | Cleanup: stop if running and forget the session; optionally delete its Claude Code transcript |
+| `whatsapp_search(query)` / `whatsapp_summary(hours=24)` / `whatsapp_send(recipient, text, confirm)` | Proxy to the private local WhatsApp MCP (set `WHATSAPP_ENV_FILE` to its `.env`). `whatsapp_send` takes only a phone number or JID, never a name, and needs `confirm=true` |
 | `memory_search` / `memory_read` / `memory_write` / `memory_append` / `memory_delete` | The brain; every write is a git commit, and delete needs `confirm=true` |
 | `memory_link(project, shared_path)` / `project_context(project)` | Link shared knowledge to a project / get everything a session on that project should know |
 | `project_sessions(project)` | Every session the project has had, on any machine, with its Claude Code session id |

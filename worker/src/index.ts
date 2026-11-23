@@ -63,7 +63,9 @@ const mcpApi: ExportedHandler<Env> = {
     server.setRequestHandler(CallToolRequestSchema, async (req) => {
       const text = (summary: string) => ({ content: [{ type: 'text', text: JSON.stringify({ summary }) }], isError: true });
       if (req.params.name === SETUP_TOOL.name) return { content: [{ type: 'text', text: JSON.stringify({ summary: setupText(origin) }) }] };
-      const result = await stub.call(req.params.name, req.params.arguments ?? {});
+      // A Durable Object hiccup (reset, overload) must come back as a readable tool error, not a failed request.
+      const result = await stub.call(req.params.name, req.params.arguments ?? {})
+        .catch((e: Error) => text(`The relay to your orchestrator agent failed (${e.message}). Try again in a few seconds.`));
       return (result ?? text(setupText(origin))) as never;
     });
     const transport = new WebStandardStreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
