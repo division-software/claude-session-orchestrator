@@ -180,7 +180,7 @@ async function waitTurn(ctx: Ctx, name: string, m: Machine, since: number, secon
 }
 
 /** The session's latest turn: exact reply from the transcript, else a pane summary. */
-async function report(ctx: Ctx, name: string, m: Machine, done = true) {
+export async function report(ctx: Ctx, name: string, m: Machine, done = true) {
   const row = ctx.db.session(name)!;
   const label = `${row.project} on ${m.id}`;
   const status = SPOKEN[row.status];
@@ -206,6 +206,26 @@ async function sendAndWait(ctx: Ctx, s: SessionRow & { m: Machine }, wait: numbe
   if (!wait) return null;
   const done = await waitTurn(ctx, s.name, s.m, sent, wait);
   return report(ctx, s.name, s.m, done);
+}
+
+/**
+ * Bring a stopped session back: same tmux name, same Claude Code conversation (--resume), same folder.
+ * Returns a sentence for the summary.
+ */
+async function wake(ctx: Ctx, row: SessionRow): Promise<string> {
+  const m = findMachine(ctx.cfg, row.machine);
+  if (await tmux.capture(m, row.name, 1).then(() => true, () => false)) {
+    ctx.db.setStatus(row.name, 'idle'); // marked stopped but its pane is still there: just use it
+    return '';
+  }
+  if (!row.claude_id) throw new UserError(`${row.name} has stopped and its conversation id is unknown; start a new session instead.`);
+  const p = findProject(ctx.cfg, row.project);
+  const label = q(row.name.slice(3));
+  const cmd = `${m.claude_cmd} --name ${label}${row.remote_control ? ` --remote-control ${label}` : ''} --resume ${row.claude_id}`;
+  await tmux.newSession(m, row.name, projectDir(m, p), cmd);
+  ctx.db.setStatus(row.name, 'waiting_input');
+  await sleep(3000); // let Claude Code draw its input box before we type into it
+  return `Woke ${row.project} (resumed its conversation). `;
 }
 
 export function line(s: LiveSession) {
@@ -303,14 +323,20 @@ export function register(server: McpServer, ctx: Ctx) {
       return { summary: `${s.project} on ${s.machine}: ${parts.join('. ')}.`, status: s.status, ...sum };
     });
 
-  tool(server, ctx, 'session_send', 'Send a message to a session (typed, then Enter) and, by default, wait for its reply.',
-    { session: z.string(), message: z.string().min(1), wait: WAIT(45) },
+  tool(server, ctx, 'session_send', 'Send a message to a session (typed, then Enter) and, by default, block until its reply and return the reply text (wait=0 to return at once). An idle or waiting session just takes the message; a stopped session is woken first by resuming its Claude Code conversation. For longer jobs, follow with session_wait or events_wait.',
+    { session: z.string(), message: z.string().min(1), wait: WAIT(90) },
     async ({ session, message, wait }) => {
-      const s = resolve(ctx, session);
+      const row = findAny(ctx, session);
+      const woke = row.status === 'stopped' ? await wake(ctx, row) : '';
+      const s = resolve(ctx, row.name);
+      if (s.status === 'waiting_approval') {
+        throw new UserError(`${s.project} is waiting for approval; answer it with session_approve first, or the message would land in the prompt.`);
+      }
       const sent = Date.now();
       await tmux.sendText(s.m, s.name, message);
       ctx.db.setStatus(s.name, 'working');
-      return (await sendAndWait(ctx, s, wait, sent)) ?? { summary: `Sent to ${s.project}.` };
+      const turn = await sendAndWait(ctx, s, wait, sent);
+      return turn ? { ...turn, summary: `${woke}${turn.summary}` } : { summary: `${woke}Sent to ${s.project}.` };
     });
 
   tool(server, ctx, 'session_wait', 'Wait for a working session to finish its turn (or ask for something), then return its reply.',

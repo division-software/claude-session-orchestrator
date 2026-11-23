@@ -2,7 +2,9 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Status } from '../summarize.ts';
 import { SESSION_RE } from '../tmux.ts';
 import { ago, tool, type Ctx } from './common.ts';
-import { projectOf, refresh, writeLog } from './sessions.ts';
+import { z } from 'zod';
+import { findMachine } from '../config.ts';
+import { projectOf, refresh, report, writeLog } from './sessions.ts';
 import { isSessionId, isTranscriptPath } from '../transcript.ts';
 
 /** Hook payload (Claude Code hook stdin JSON) → session status. Spec §13. */
@@ -54,5 +56,37 @@ export function register(server: McpServer, ctx: Ctx) {
           : 'Nothing is waiting for you.',
         pending: p.map((s) => ({ session: s.name, project: s.project, machine: s.machine, status: s.status, since: new Date(s.status_since).toISOString(), message: s.last_message })),
       };
+    });
+
+  tool(server, ctx, 'events_wait', 'Block until any session finishes a turn, needs input or approval, or ends, then return what happened, with the reply text of finished sessions. Pass the returned cursor back on the next call so nothing is missed or repeated; without a cursor it waits for events from now on. Use this to hear back from sessions without the user asking.',
+    {
+      cursor: z.number().int().min(0).optional().describe('cursor from the previous events_wait call'),
+      session: z.string().optional().describe('Only events of this session (full name, e.g. cc-demo)'),
+      seconds: z.number().int().min(0).max(100).default(90).describe('How long to wait for an event (max 100)'),
+    },
+    async ({ cursor, session, seconds }) => {
+      let after = cursor ?? ctx.db.lastEventId();
+      const end = Date.now() + seconds * 1000;
+      for (;;) {
+        const all = ctx.db.eventsAfter(after);
+        if (all.length) after = all.at(-1)!.id;
+        const evs = all.filter((e) => !session || e.session === session);
+        if (evs.length || Date.now() >= end) {
+          // One reply per session: its latest turn. Rows may be gone if the session was deleted meanwhile.
+          const out = await Promise.all(evs.map(async (e, i) => {
+            const row = ctx.db.session(e.session);
+            const latest = evs.findLastIndex((x) => x.session === e.session) === i;
+            const turn = latest && row && e.status !== 'stopped'
+              ? await report(ctx, e.session, findMachine(ctx.cfg, row.machine)).catch(() => null) : null;
+            return { session: e.session, project: row?.project, event: e.hook, status: e.status, at: new Date(e.ts).toISOString(), message: e.message, ...(turn && { summary: turn.summary, reply: 'reply' in turn ? turn.reply : null }) };
+          }));
+          const said = out.filter((e) => e.summary).map((e) => e.summary);
+          return {
+            summary: out.length ? `${out.length} event${out.length === 1 ? '' : 's'}. ${said.join(' ') || out.map((e) => `${e.project ?? e.session} is ${e.status}.`).join(' ')}` : `No session events in ${seconds} seconds. Call events_wait again with the cursor to keep listening.`,
+            cursor: after, events: out,
+          };
+        }
+        await new Promise((r) => setTimeout(r, 1000));
+      }
     });
 }

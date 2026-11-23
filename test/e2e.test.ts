@@ -42,7 +42,7 @@ setPower('AC Power');
 process.env.HOME = join(tmp, 'home');
 const FAKE = join(tmp, 'bin', 'fake-claude');
 writeFileSync(FAKE, `#!/bin/sh
-sid=; prev=; for a in "$@"; do [ "$prev" = --session-id ] && sid=$a; prev=$a; done
+sid=; prev=; for a in "$@"; do case "$prev" in --session-id|--resume) sid=$a;; esac; prev=$a; done
 t="$HOME/.claude/projects/fake/$sid.jsonl"; mkdir -p "$HOME/.claude/projects/fake"
 echo "args: $*"
 while read l; do
@@ -108,7 +108,7 @@ after(async () => {
 
 test('lists all tools', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['agent_run', 'agent_status', 'events_pending', 'llm_list', 'llm_run', 'machine_list', 'machine_status',
+  assert.deepEqual(names, ['agent_run', 'agent_status', 'events_pending', 'events_wait', 'llm_list', 'llm_run', 'machine_list', 'machine_status',
     'memory_append', 'memory_delete', 'memory_link', 'memory_read', 'memory_search', 'memory_write', 'overview', 'project_context',
     'project_sessions', 'session_approve', 'session_delete', 'session_interrupt', 'session_list', 'session_read', 'session_send', 'session_start', 'session_stop', 'session_wait']);
 });
@@ -365,6 +365,47 @@ test('fast loop: session_send waits and returns the exact reply from the transcr
   const w = await call('session_wait', { session: 'cc-reply-test', seconds: 5 });
   assert.equal(w.done, true);
   await call('session_stop', { session: 'cc-reply-test', mode: 'kill', confirm: true });
+});
+
+test('two-way: events_wait hears a finished session; session_send wakes a stopped one', async () => {
+  const start = await call('session_start', { project: 'demo', name: 'two way', wait: 0 });
+  assert.ok(!start.err, start.summary);
+  await call('session_send', { session: 'cc-two-way', message: 'build', wait: 0 }); // the fake writes its transcript on input
+  await wait(500);
+  const post = (body: unknown) => fetch(`${base}/events?session=cc-two-way&machine=node2`, {
+    method: 'POST', headers: { authorization: `Bearer ${machineToken('secret', 'node2')}`, 'content-type': 'application/json' }, body: JSON.stringify(body),
+  });
+  // Listening starts first; the Stop hook arrives while it blocks.
+  const t0 = Date.now();
+  const heard = call('events_wait', { session: 'cc-two-way', seconds: 20 });
+  await wait(1500);
+  assert.equal((await post({ hook_event_name: 'Stop' })).status, 204);
+  const ev = await heard;
+  assert.ok(Date.now() - t0 < 10_000, 'returns on the event, not after the timeout');
+  assert.equal(ev.events.length, 1);
+  assert.equal(ev.events[0].event, 'Stop');
+  assert.equal(ev.events[0].reply, 'Done with build. All good.');
+  assert.match(ev.summary, /demo on node2 replied: Done with build/);
+  // The cursor hides what was already seen.
+  const none = await call('events_wait', { cursor: ev.cursor, session: 'cc-two-way', seconds: 1 });
+  assert.equal(none.events.length, 0);
+  assert.equal(none.cursor, ev.cursor);
+
+  // A pending permission prompt is never typed into.
+  db.setStatus('cc-two-way', 'waiting_approval');
+  assert.match((await call('session_send', { session: 'cc-two-way', message: 'x', wait: 0 })).summary, /session_approve first/);
+
+  // Stopped (pane gone): session_send resumes the same conversation and returns the reply.
+  const id = db.session('cc-two-way')!.claude_id;
+  db.setStatus('cc-two-way', 'stopped');
+  execSync(`tmux -L orch-test kill-session -t '=cc-two-way'`);
+  const r = await call('session_send', { session: 'cc-two-way', message: 'again', wait: 20 });
+  assert.ok(!r.err, r.summary);
+  assert.match(r.summary, /^Woke demo/);
+  assert.equal(r.reply, 'Done with again. All good.');
+  const tail = await call('session_read', { session: 'cc-two-way', mode: 'tail' });
+  assert.match(tail.text, new RegExp(`--resume ${id}`));
+  await call('session_stop', { session: 'cc-two-way', mode: 'kill', confirm: true });
 });
 
 test('session_delete stops, forgets, and optionally removes the transcript', async () => {
