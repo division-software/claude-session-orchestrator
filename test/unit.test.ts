@@ -160,3 +160,32 @@ test('cli: init writes a loadable config with private tokens, install print give
   const out = JSON.parse(cli('install', 'print'));
   assert.deepEqual(out.mcpServers['session-orchestrator'].args.slice(-2), [join(process.cwd(), 'src', 'cli.ts'), 'stdio']);
 });
+
+test('pickIdle: long-idle sessions stop, keep/working never; low memory stops local ones longest idle first', async () => {
+  const { pickIdle } = await import('../src/reaper.ts');
+  const H = 3600_000, now = 1_000 * H;
+  const s = (name: string, idleH: number, extra: Record<string, unknown> = {}) => ({
+    name, machine: 'node2', project: 'p', status: 'idle', remote_control: 1, status_since: now - idleH * H, last_message: null,
+    claude_id: null, transcript: null, created: 0, keep: 0, reachable: true, last_activity: now - idleH * H, local: true, ...extra,
+  }) as never;
+  const ss = [
+    s('cc-old', 50), s('cc-kept', 99, { keep: 1 }), s('cc-busy', 99, { status: 'working' }), s('cc-asking', 99, { status: 'waiting_approval' }),
+    s('cc-typed', 60, { last_activity: now - 1000 }), // pane activity is recent: someone is using it
+    s('cc-a', 5), s('cc-b', 3), s('cc-c', 4), s('cc-d', 2.5), s('cc-fresh', 1), s('cc-remote', 10, { local: false }),
+  ];
+  const opts = { idleHours: 48, memIdleHours: 2, memLow: false, memMax: 3 };
+  assert.deepEqual(pickIdle(ss, now, opts).map((p) => p.name), ['cc-old']);
+  const low = pickIdle(ss, now, { ...opts, memLow: true });
+  assert.deepEqual(low.map((p) => p.name), ['cc-old', 'cc-a', 'cc-c', 'cc-b']); // 3 low-memory stops, longest idle first
+  assert.match(low[1].reason, /idle 5 h while memory was low/);
+  assert.deepEqual(pickIdle(ss, now, { ...opts, idleHours: 0 }), []); // 0 turns the idle rule off
+});
+
+test('parseMessages reads whatsapp-mcp listings, including multi-line messages', async () => {
+  const { parseMessages } = await import('../src/tools/whatsapp.ts');
+  const m = parseMessages('[2026-11-23 20:01:02] Chat: Family From: Mom: dinner at 7?\nbring bread\n[2026-11-23 20:05:00] Chat: Family From: Me: ok\n[2026-11-23 21:00:00] From: Bob: [image - Message ID: X - Chat JID: 1@s.whatsapp.net] look');
+  assert.equal(m.length, 3);
+  assert.deepEqual(m[0], { at: '2026-11-23 20:01:02', chat: 'Family', from: 'Mom', text: 'dinner at 7?\nbring bread' });
+  assert.equal(m[2].chat, null);
+  assert.equal(m[2].from, 'Bob');
+});

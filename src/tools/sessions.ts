@@ -208,6 +208,15 @@ async function sendAndWait(ctx: Ctx, s: SessionRow & { m: Machine }, wait: numbe
   return report(ctx, s.name, s.m, done);
 }
 
+/** Log the session to the brain, then /exit it (graceful) or close its tmux session (kill). */
+export async function stopSession(ctx: Ctx, s: SessionRow, m: Machine, mode: 'graceful' | 'kill', note?: string) {
+  await writeLog(ctx, s, m, note); // while the pane still exists
+  // Mark stopped first so the SessionEnd hook that /exit triggers does not log a second time.
+  ctx.db.setStatus(s.name, 'stopped', note ?? null);
+  if (mode === 'kill') await tmux.kill(m, s.name);
+  else await tmux.sendText(m, s.name, '/exit');
+}
+
 /**
  * Bring a stopped session back: same tmux name, same Claude Code conversation (--resume), same folder.
  * Returns a sentence for the summary.
@@ -243,7 +252,7 @@ export function register(server: McpServer, ctx: Ctx) {
         sessions: ss.map((s) => ({
           name: s.name, project: s.project, machine: s.machine, status: s.status,
           last_activity: s.last_activity && new Date(s.last_activity).toISOString(),
-          remote_control: !!s.remote_control, machine_reachable: s.reachable,
+          remote_control: !!s.remote_control, machine_reachable: s.reachable, keep: !!s.keep,
         })),
       };
     });
@@ -300,6 +309,14 @@ export function register(server: McpServer, ctx: Ctx) {
       const base = `${setup ? `${setup}${trustWarning ? ` ${trustWarning}` : ' Trusted it in Claude Code.'} ` : ''}Started ${p.id} on ${m.id} as ${sname}${remote_control ? '; it shows in the Claude app' : ''}.${warning ? ` ${warning}` : ''}`;
       const turn = prompt ? await sendAndWait(ctx, { ...ctx.db.session(sname)!, m }, wait, started) : null;
       return turn ? { ...turn, summary: `${base} ${turn.summary}`, session: sname } : { summary: base, session: sname };
+    });
+
+  tool(server, ctx, 'session_keep', 'Mark a session keep=true so the idle cleanup never stops it (or keep=false to allow it again). Idle sessions are otherwise stopped after a while to free memory; session_send wakes them again with their conversation intact.',
+    { session: z.string(), keep: z.boolean().default(true) },
+    async ({ session, keep }) => {
+      const s = findAny(ctx, session);
+      ctx.db.setKeep(s.name, keep);
+      return { summary: keep ? `${s.project} (${s.name}) will be kept running.` : `${s.project} (${s.name}) may be stopped when idle.` };
     });
 
   tool(server, ctx, 'session_read', 'Read a session. reply (default): its latest reply text, the tools it used and files it changed, from Claude Code\'s transcript. summary: a short status from the terminal. tail: the cleaned terminal text.',
@@ -378,11 +395,7 @@ export function register(server: McpServer, ctx: Ctx) {
     async ({ session, mode, confirm }) => {
       const s = resolve(ctx, session);
       if (mode === 'kill' && confirm !== true) throw new UserError(`Killing ${s.name} needs confirm=true. Ask the user first.`);
-      await writeLog(ctx, s, s.m); // while the pane still exists
-      // Mark stopped first so the SessionEnd hook that /exit triggers does not log a second time.
-      ctx.db.setStatus(s.name, 'stopped');
-      if (mode === 'kill') await tmux.kill(s.m, s.name);
-      else await tmux.sendText(s.m, s.name, '/exit');
+      await stopSession(ctx, s, s.m, mode);
       return { summary: `${mode === 'kill' ? 'Killed' : 'Stopped'} ${s.project} on ${s.machine}.` };
     });
 

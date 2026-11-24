@@ -22,6 +22,7 @@ const HINTS: Record<string, Hint> = {
   session_interrupt: ['Interrupt a session', 'write'],
   session_stop: ['Stop a session', 'destructive'],
   session_delete: ['Delete a session', 'destructive'],
+  session_keep: ['Keep a session from idle cleanup', 'write'],
   events_pending: ['What is waiting for me', 'read'],
   events_wait: ['Wait for sessions to finish or need you', 'read'],
   overview: ['Overview of all projects', 'read'],
@@ -37,6 +38,9 @@ const HINTS: Record<string, Hint> = {
   llm_run: ['Run a task on a local model', 'read', true],
   agent_run: ['Run a local agent', 'destructive', true],
   agent_status: ['Local agent job status', 'read'],
+  whatsapp_search: ['Search WhatsApp', 'read', true],
+  whatsapp_summary: ['Recent WhatsApp activity', 'read', true],
+  whatsapp_send: ['Send a WhatsApp message', 'destructive', true],
 };
 
 /**

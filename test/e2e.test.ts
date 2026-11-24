@@ -14,12 +14,17 @@ import { Db } from '../src/db.ts';
 import type { Config } from '../src/config.ts';
 import { ensureBrain } from '../src/tools/memory.ts';
 import { machineToken } from '../src/auth.ts';
+import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
+import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
+import { z } from 'zod';
+import { reap } from '../src/reaper.ts';
 
 const tmp = mkdtempSync(join(tmpdir(), 'orch-'));
 // Never touch the user's tmux: inside tmux, $TMUX overrides TMUX_TMPDIR, so drop it, and force a named socket.
 const REAL_TMUX = execSync('command -v tmux').toString().trim();
 delete process.env.TMUX;
 process.env.TMUX_TMPDIR = tmp; // private tmux server, inherited by every child process
+process.env.CSO_TMUX_SCOPE = 'cso-test-tmux'; // never take the real server's systemd scope name
 process.env.BRAIN_DIR = join(tmp, 'brain');
 process.env.CONFIG_DIR = join(tmp, 'config'); // project_create writes projects.yaml here
 mkdirSync(join(tmp, 'config'));
@@ -65,6 +70,28 @@ const fakeLlm = createServer(async (req, res) => {
   res.end(JSON.stringify({ choices: [{ message: { content: `${model} says: ${messages.at(-1).content.toUpperCase()}` } }] }));
 });
 
+// Fake whatsapp-mcp: same tool names and output shapes, bearer auth, records what was sent.
+const waSent: { recipient: string; message: string }[] = [];
+const WA_LIST = '[2026-11-23 20:01:02] Chat: Family From: Mom: dinner at 7?\n[2026-11-23 20:02:00] Chat: Family From: Me: yes\n[2026-11-23 20:03:00] Chat: Work From: Ann: deploy done';
+const fakeWa = createServer(async (req, res) => {
+  if (req.headers.authorization !== 'Bearer wa-secret') return void res.writeHead(401).end();
+  const s = new McpServer({ name: 'wa', version: '0' });
+  const t = (txt: unknown) => ({ content: [{ type: 'text' as const, text: typeof txt === 'string' ? txt : JSON.stringify(txt) }] });
+  s.registerTool('list_chats', { inputSchema: { query: z.string().nullable().optional() } }, async () => t({ jid: '1203630@g.us', name: 'Family' }));
+  s.registerTool('search_contacts', { inputSchema: { query: z.string() } }, async () => t({ phone_number: '31600000001', name: 'Mom', jid: '31600000001@s.whatsapp.net' }));
+  s.registerTool('list_messages', { inputSchema: { query: z.string().nullable().optional(), after: z.string().nullable().optional() } }, async ({ query }) =>
+    t(query ? WA_LIST.split('\n').filter((l) => l.includes(query)).join('\n') || 'No messages to display.' : WA_LIST));
+  s.registerTool('send_message', { inputSchema: { recipient: z.string(), message: z.string() } }, async (a) => { waSent.push(a); return t({ success: true, message: 'sent' }); });
+  const tr = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined, enableJsonResponse: true });
+  res.on('close', () => { tr.close(); s.close(); });
+  await s.connect(tr);
+  let body = '';
+  for await (const c of req) body += c;
+  await tr.handleRequest(req, res, body ? JSON.parse(body) : undefined);
+});
+writeFileSync(join(tmp, 'wa.env'), 'MCP_PORT=1\nMCP_TOKEN="wa-secret"\n', { mode: 0o600 });
+process.env.WHATSAPP_ENV_FILE = join(tmp, 'wa.env');
+
 let cfg: Config;
 const db = new Db(join(tmp, 't.db'));
 let srv: Server, base = '', client: Client;
@@ -77,6 +104,8 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 
 before(async () => {
   await new Promise<void>((r) => fakeLlm.listen(0, '127.0.0.1', r));
+  await new Promise<void>((r) => fakeWa.listen(0, '127.0.0.1', r));
+  process.env.WHATSAPP_MCP_URL = `http://127.0.0.1:${(fakeWa.address() as AddressInfo).port}/mcp`;
   const llmUrl = `http://127.0.0.1:${(fakeLlm.address() as AddressInfo).port}/v1`;
   cfg = {
     machines: [
@@ -103,6 +132,7 @@ after(async () => {
   await client.close();
   srv.close();
   fakeLlm.close();
+  fakeWa.close();
   execSync(`${REAL_TMUX} -L orch-test kill-server 2>/dev/null || true`);
 });
 
@@ -110,7 +140,8 @@ test('lists all tools', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
   assert.deepEqual(names, ['agent_run', 'agent_status', 'events_pending', 'events_wait', 'llm_list', 'llm_run', 'machine_list', 'machine_status',
     'memory_append', 'memory_delete', 'memory_link', 'memory_read', 'memory_search', 'memory_write', 'overview', 'project_context',
-    'project_sessions', 'session_approve', 'session_delete', 'session_interrupt', 'session_list', 'session_read', 'session_send', 'session_start', 'session_stop', 'session_wait']);
+    'project_sessions', 'session_approve', 'session_delete', 'session_interrupt', 'session_keep', 'session_list', 'session_read', 'session_send', 'session_start', 'session_stop', 'session_wait',
+    'whatsapp_search', 'whatsapp_send', 'whatsapp_summary']);
 });
 
 test('unreachable Mac fails fast with a speakable error', async () => {
@@ -488,4 +519,47 @@ test('new project: own folder and git repo, project-named sessions, shared histo
   assert.ok(!cfg.projects.some((p) => p.id === 'evil')); // failed setup registers nothing
 
   for (const s of ['cc-side-quest', 'cc-side-quest-3', 'cc-nested', 'cc-cloned']) await call('session_stop', { session: s, mode: 'kill', confirm: true });
+});
+
+test('idle cleanup stops long-idle sessions but never kept ones; health is ok', async () => {
+  await call('session_start', { project: 'demo', name: 'idle one', wait: 0 });
+  await call('session_start', { project: 'demo', name: 'kept one', wait: 0 });
+  assert.match((await call('session_keep', { session: 'cc-kept-one' })).summary, /will be kept running/);
+  await wait(1500);
+  const picks = await reap({ cfg, db }, { IDLE_STOP_HOURS: String(1 / 3600), MEM_MIN_AVAILABLE_PCT: '0' }); // "idle" after 1 s
+  const names = picks.map((p) => p.name);
+  assert.ok(names.includes('cc-idle-one'), JSON.stringify(picks));
+  assert.ok(!names.includes('cc-kept-one'));
+  assert.equal(db.session('cc-idle-one')!.status, 'stopped');
+  assert.match(db.session('cc-idle-one')!.last_message!, /Auto-stopped: idle/);
+  const ev = db.db.prepare("SELECT hook FROM events WHERE session = 'cc-idle-one'").all() as { hook: string }[];
+  assert.ok(ev.some((e) => e.hook === 'AutoStop'));
+  assert.equal(db.session('cc-kept-one')!.status !== 'stopped', true);
+  assert.equal((await call('session_list')).sessions.find((s: { name: string }) => s.name === 'cc-kept-one').keep, true);
+  for (const s of ['cc-kept-one']) await call('session_stop', { session: s, mode: 'kill', confirm: true });
+  execSync(`tmux -L orch-test kill-session -t '=cc-idle-one' 2>/dev/null || true`); // the fake ignores /exit
+  assert.equal(await (await fetch(`${base}/health`)).text(), 'ok');
+});
+
+test('whatsapp proxy: search, summary, and send only with explicit recipient, text and confirm', async () => {
+  const s = await call('whatsapp_search', { query: 'dinner' });
+  assert.ok(!s.err, s.summary);
+  assert.match(s.summary, /1 message mention "dinner"; 1 chat and 1 contact match/);
+  assert.equal(s.contacts[0].phone_number, '31600000001');
+
+  const sum = await call('whatsapp_summary', { hours: 24 });
+  assert.match(sum.summary, /3 messages in the last 24 h across 2 chats\. Most active: Family \(2\), Work \(1\)/);
+  assert.equal(sum.chats[0].from_others, 1);
+
+  assert.match((await call('whatsapp_send', { recipient: 'Mom', text: 'hi', confirm: true })).summary, /not a phone number or chat JID/);
+  const noText = await client.callTool({ name: 'whatsapp_send', arguments: { recipient: '31600000001' } }) as { isError?: boolean };
+  assert.equal(noText.isError, true); // text is required by the schema
+  assert.match((await call('whatsapp_send', { recipient: '+31600000001', text: 'hi' })).summary, /needs confirm=true/);
+  assert.equal(waSent.length, 0);
+  const ok = await call('whatsapp_send', { recipient: '+31600000001', text: 'on my way', confirm: true });
+  assert.equal(ok.summary, 'Sent to 31600000001.');
+  assert.deepEqual(waSent, [{ recipient: '31600000001', message: 'on my way' }]);
+
+  writeFileSync(join(tmp, 'wa.env'), 'MCP_TOKEN=wrong\n');
+  assert.match((await call('whatsapp_summary', {})).summary, /WhatsApp is not reachable/);
 });

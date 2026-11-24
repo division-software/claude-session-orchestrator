@@ -43,19 +43,45 @@ export class UserHub extends DurableObject<Env> {
     }
   }
 
-  async webSocketClose(ws: WebSocket, code: number) { ws.close(code === 1005 ? 1000 : code, 'closed'); }
+  async webSocketClose(ws: WebSocket, code: number) {
+    // Only when no live socket is left: in-flight calls on a newer socket are still being answered.
+    if (!this.agent()) this.failPending('Your orchestrator agent disconnected during the call; it reconnects within seconds. Try again.');
+    try { ws.close(code === 1005 || code === 1006 ? 1000 : code, 'closed'); } catch { /* already closed */ }
+  }
+
+  async webSocketError(ws: WebSocket) {
+    try { ws.close(1011, 'error'); } catch { /* already closed */ }
+  }
 
   async tools(): Promise<ToolInfo[]> { return (await this.ctx.storage.get<ToolInfo[]>('tools')) ?? []; }
 
+  /**
+   * The live agent socket: the newest OPEN one. A socket whose peer vanished (close 1006) can stay listed,
+   * CLOSING, long after the agent reconnected; [0] was that dead one, so every call failed for hours.
+   */
+  private agent(): WebSocket | undefined {
+    const since = (ws: WebSocket) => (ws.deserializeAttachment() as { since?: number } | null)?.since ?? 0;
+    return this.ctx.getWebSockets('agent').filter((ws) => ws.readyState === WebSocket.OPEN).sort((a, b) => since(b) - since(a))[0];
+  }
+
+  /** Answer every in-flight call at once instead of letting each wait out CALL_TIMEOUT_MS. */
+  private failPending(summary: string) {
+    for (const [id, p] of this.pending) {
+      clearTimeout(p.timer);
+      this.pending.delete(id);
+      p.resolve({ content: [{ type: 'text', text: JSON.stringify({ summary }) }], isError: true });
+    }
+  }
+
   async status() {
-    const ws = this.ctx.getWebSockets('agent')[0];
+    const ws = this.agent();
     const tools = await this.tools();
     return { online: !!ws, since: ws ? (ws.deserializeAttachment() as { since: number }).since : null, tools: tools.length };
   }
 
   /** Relay one tools/call to the agent; resolves with the agent's CallToolResult. */
   async call(name: string, args: unknown): Promise<Result | null> {
-    const ws = this.ctx.getWebSockets('agent')[0];
+    const ws = this.agent();
     if (!ws) return null; // offline: the caller explains how to start the agent
     const id = crypto.randomUUID();
     return new Promise<Result>((resolve) => {
@@ -64,7 +90,13 @@ export class UserHub extends DurableObject<Env> {
         resolve({ content: [{ type: 'text', text: JSON.stringify({ summary: 'Your orchestrator agent did not answer within 2 minutes.' }) }], isError: true });
       }, CALL_TIMEOUT_MS);
       this.pending.set(id, { resolve, timer });
-      ws.send(JSON.stringify({ type: 'call', id, name, args }));
+      try {
+        ws.send(JSON.stringify({ type: 'call', id, name, args }));
+      } catch {
+        clearTimeout(timer);
+        this.pending.delete(id);
+        resolve({ content: [{ type: 'text', text: JSON.stringify({ summary: 'Your orchestrator agent just disconnected; it reconnects within seconds. Try again.' }) }], isError: true });
+      }
     });
   }
 

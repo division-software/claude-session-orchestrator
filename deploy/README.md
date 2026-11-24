@@ -18,6 +18,17 @@ Check: `curl -s localhost:8787/health` prints `ok`. `journalctl -u orchestrator`
 
 The `orchestrator` user needs key-only SSH to gpu and macbook (`ssh -o BatchMode=yes gpu true` must work as that user) and a git identity for the brain repo.
 
+### Health check and idle cleanup
+
+A timer restarts the service when `/health` fails 3 times in a row (hung process, broken database, or the cloud link down for 5+ minutes). For a user-level unit (edit the path in `orchestrator-health.service` if the repo lives elsewhere):
+
+```sh
+cp deploy/orchestrator-health.service deploy/orchestrator-health.timer ~/.config/systemd/user/
+systemctl --user daemon-reload && systemctl --user enable --now orchestrator-health.timer
+```
+
+The service itself stops idle sessions every `REAP_MINUTES` (10): any session idle `IDLE_STOP_HOURS` (48), and, while available RAM is under `MEM_MIN_AVAILABLE_PCT` (15 %), up to 3 local sessions idle `MEM_STOP_IDLE_HOURS` (2) per pass, longest idle first. Sessions marked with `session_keep` are never stopped; `session_send` resumes a stopped one. Set `REAP_MINUTES=0` to turn it off.
+
 ## 2. Hooks and skills on every machine
 
 ```sh

@@ -4,6 +4,9 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 
+/** For /health: whether the cloud link is up, and since when it has been in that state. */
+export const cloudLink = { enabled: false, up: false, since: Date.now() };
+
 export async function connectCloud(makeServer: () => McpServer, url: string, token: string) {
   const u = new URL(url);
   // The token must never travel in clear text: plain ws:// only for a local test server.
@@ -17,6 +20,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
   const { tools } = await client.listTools();
 
   let delay = 1000;
+  cloudLink.enabled = true;
   const open = () => {
     const ws = new WebSocket(url, { headers: { authorization: `Bearer ${token}` } } as never);
     let lastPong = Date.now();
@@ -24,6 +28,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
     ws.onopen = () => {
       delay = 1000;
       lastPong = Date.now();
+      Object.assign(cloudLink, { up: true, since: Date.now() });
       ws.send(JSON.stringify({ type: 'hello', tools }));
       timer = setInterval(() => {
         if (Date.now() - lastPong > 75_000) return ws.close(); // dead link: reconnect
@@ -47,6 +52,7 @@ export async function connectCloud(makeServer: () => McpServer, url: string, tok
     };
     ws.onclose = (ev) => {
       clearInterval(timer);
+      if (cloudLink.up) Object.assign(cloudLink, { up: false, since: Date.now() });
       if (ev.code === 4001) return console.error('cloud: agent token revoked; not reconnecting. Create a new token in the dashboard.');
       if (ev.code === 4000) return console.error('cloud: another agent connected with this account; this one stops.');
       console.error(`cloud: disconnected (${ev.code}${ev.reason ? ` ${ev.reason}` : ''}); retrying in ${delay / 1000}s`);
