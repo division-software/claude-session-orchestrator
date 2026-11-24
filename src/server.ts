@@ -13,10 +13,11 @@ import * as machines from './tools/machines.ts';
 import * as memory from './tools/memory.ts';
 import * as sessions from './tools/sessions.ts';
 import * as whatsapp from './tools/whatsapp.ts';
+import * as gen from './tools/gen.ts';
 
 export function mcpServer(ctx: Ctx) {
   const server = new McpServer({ name: 'session-orchestrator', version: '1.0.0' });
-  for (const mod of [machines, sessions, events, memory, llm, whatsapp]) mod.register(server, ctx);
+  for (const mod of [machines, sessions, events, memory, llm, whatsapp, gen]) mod.register(server, ctx);
   return server;
 }
 

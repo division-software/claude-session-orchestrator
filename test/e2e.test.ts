@@ -89,6 +89,28 @@ const fakeWa = createServer(async (req, res) => {
   for await (const c of req) body += c;
   await tr.handleRequest(req, res, body ? JSON.parse(body) : undefined);
 });
+// Fake genapi: REST shapes of genapi.py. An image is done at once unless the prompt says "slow" (then it stays running).
+const genJobs: Record<string, Record<string, unknown>> = {};
+const fakeGen = createServer(async (req, res) => {
+  let body = '';
+  for await (const c of req) body += c;
+  const send = (code: number, o: unknown) => { res.writeHead(code, { 'content-type': 'application/json' }); res.end(JSON.stringify(o)); };
+  const b = body ? JSON.parse(body) : {};
+  if (req.url === '/api/image') {
+    const id = `i${Object.keys(genJobs).length}`;
+    genJobs[id] = b.prompt === 'slow' ? { id, kind: 'image', state: 'running' } : { id, kind: 'image', state: 'done', url: `http://gen.lan/files/${id}.png` };
+    return send(200, genJobs[id]);
+  }
+  if (req.url === '/api/video') {
+    if ((b.frames - 5) % 17) return send(400, { error: 'frames must be on the 17k+5 grid' });
+    const id = `v${Object.keys(genJobs).length}`;
+    genJobs[id] = { id, kind: 'video', state: 'queued', queue_position: 1, params: b };
+    return send(200, genJobs[id]);
+  }
+  if (req.url!.startsWith('/api/jobs?')) return send(200, Object.values(genJobs).reverse());
+  const id = req.url!.split('/').pop()!;
+  send(200, genJobs[id] ?? { error: `no job ${id}` });
+});
 writeFileSync(join(tmp, 'wa.env'), 'MCP_PORT=1\nMCP_TOKEN="wa-secret"\n', { mode: 0o600 });
 process.env.WHATSAPP_ENV_FILE = join(tmp, 'wa.env');
 
@@ -105,6 +127,9 @@ const wait = (ms: number) => new Promise((r) => setTimeout(r, ms));
 before(async () => {
   await new Promise<void>((r) => fakeLlm.listen(0, '127.0.0.1', r));
   await new Promise<void>((r) => fakeWa.listen(0, '127.0.0.1', r));
+  await new Promise<void>((r) => fakeGen.listen(0, '127.0.0.1', r));
+  process.env.GEN_API_URL = `http://127.0.0.1:${(fakeGen.address() as AddressInfo).port}/`;
+  process.env.GEN_WAIT_MS = '2500';
   process.env.WHATSAPP_MCP_URL = `http://127.0.0.1:${(fakeWa.address() as AddressInfo).port}/mcp`;
   const llmUrl = `http://127.0.0.1:${(fakeLlm.address() as AddressInfo).port}/v1`;
   cfg = {
@@ -133,12 +158,13 @@ after(async () => {
   srv.close();
   fakeLlm.close();
   fakeWa.close();
+  fakeGen.close();
   execSync(`${REAL_TMUX} -L orch-test kill-server 2>/dev/null || true`);
 });
 
 test('lists all tools', async () => {
   const names = (await client.listTools()).tools.map((t) => t.name).sort();
-  assert.deepEqual(names, ['agent_run', 'agent_status', 'events_pending', 'events_wait', 'llm_list', 'llm_run', 'machine_list', 'machine_status',
+  assert.deepEqual(names, ['agent_run', 'agent_status', 'events_pending', 'events_wait', 'gen_image', 'gen_status', 'gen_video', 'llm_list', 'llm_run', 'machine_list', 'machine_status',
     'memory_append', 'memory_delete', 'memory_link', 'memory_read', 'memory_search', 'memory_write', 'overview', 'project_context',
     'project_sessions', 'session_approve', 'session_delete', 'session_interrupt', 'session_keep', 'session_list', 'session_read', 'session_send', 'session_start', 'session_stop', 'session_wait',
     'whatsapp_search', 'whatsapp_send', 'whatsapp_summary']);
@@ -562,4 +588,24 @@ test('whatsapp proxy: search, summary, and send only with explicit recipient, te
 
   writeFileSync(join(tmp, 'wa.env'), 'MCP_TOKEN=wrong\n');
   assert.match((await call('whatsapp_summary', {})).summary, /WhatsApp is not reachable/);
+});
+
+test('gen proxy: image waits for the result, video returns a job, bad input and unknown jobs are speakable errors', async () => {
+  const img = await call('gen_image', { prompt: 'a fox in snow', width: 1344, height: 768 });
+  assert.ok(!img.err, img.summary);
+  assert.match(img.summary, /^Image i\d+ is ready: http:\/\/gen\.lan\/files\/i\d+\.png$/);
+
+  const slow = await call('gen_image', { prompt: 'slow' });
+  assert.match(slow.summary, /is running; check it with gen_status/); // gave up after GEN_WAIT_MS instead of hanging
+
+  const vid = await call('gen_video', { prompt: 'a kitten surfing', init_image_job: img.id });
+  assert.match(vid.summary, /^Video job v\d+ is queued at position 1/);
+  assert.equal(vid.params.frames, 56);
+  assert.equal(vid.params.init_image_job, img.id);
+  assert.match((await call('gen_video', { prompt: 'x', frames: 60 })).summary, /Generation refused: frames must be on the 17k\+5 grid/);
+
+  assert.match((await call('gen_status', { job_id: vid.id })).summary, /is queued/);
+  assert.match((await call('gen_status', { job_id: 'nope' })).summary, /No generation job nope/);
+  const all = await call('gen_status', {});
+  assert.match(all.summary, /^3 recent jobs, 2 still queued or running\./);
 });

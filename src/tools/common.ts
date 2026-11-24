@@ -41,6 +41,9 @@ const HINTS: Record<string, Hint> = {
   whatsapp_search: ['Search WhatsApp', 'read', true],
   whatsapp_summary: ['Recent WhatsApp activity', 'read', true],
   whatsapp_send: ['Send a WhatsApp message', 'destructive', true],
+  gen_image: ['Generate an image', 'write', true],
+  gen_video: ['Start a video', 'write', true],
+  gen_status: ['Image/video job status', 'read', true],
 };
 
 /**

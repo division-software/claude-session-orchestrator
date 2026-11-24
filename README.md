@@ -26,7 +26,7 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
                                           └───── hooks POST /events (Bearer EVENTS_TOKEN) ─────┘
 ```
 
-## Tools (27, plus 3 WhatsApp tools when configured)
+## Tools (27, plus 3 WhatsApp and 3 generation tools when configured)
 
 | Tool | What it does |
 | --- | --- |
@@ -44,6 +44,7 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
 | `session_keep(session, keep=true)` | Exempt a session from the idle cleanup (sessions idle 48 h, or 2 h while RAM is low, are stopped; `session_send` resumes them) |
 | `session_delete(session \| all_stopped, delete_transcript?, confirm)` | Cleanup: stop if running and forget the session; optionally delete its Claude Code transcript |
 | `whatsapp_search(query)` / `whatsapp_summary(hours=24)` / `whatsapp_send(recipient, text, confirm)` | Proxy to the private local WhatsApp MCP (set `WHATSAPP_ENV_FILE` to its `.env`). `whatsapp_send` takes only a phone number or JID, never a name, and needs `confirm=true` |
+| `gen_image(prompt, width, height)` / `gen_video(prompt, frames, init_image_job)` / `gen_status(job_id)` | Proxy to genapi on the GPU node (set `GEN_API_URL`, e.g. `http://gen.lan`): Z-Image Turbo images (waits up to `GEN_WAIT_MS`, 90 s) and MiniMax H3 videos (job id at once). Results are LAN/Tailscale URLs |
 | `memory_search` / `memory_read` / `memory_write` / `memory_append` / `memory_delete` | The brain; every write is a git commit, and delete needs `confirm=true` |
 | `memory_link(project, shared_path)` / `project_context(project)` | Link shared knowledge to a project / get everything a session on that project should know |
 | `project_sessions(project)` | Every session the project has had, on any machine, with its Claude Code session id |
