@@ -23,6 +23,7 @@ const HINTS: Record<string, Hint> = {
   session_stop: ['Stop a session', 'destructive'],
   session_delete: ['Delete a session', 'destructive'],
   events_pending: ['What is waiting for me', 'read'],
+  events_wait: ['Wait for sessions to finish or need you', 'read'],
   overview: ['Overview of all projects', 'read'],
   memory_search: ['Search shared memory', 'read'],
   memory_read: ['Read a memory file', 'read'],

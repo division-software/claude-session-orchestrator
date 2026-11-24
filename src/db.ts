@@ -90,6 +90,16 @@ export class Db {
       .run(session, hook, status, message, Date.now());
   }
 
+  /** Hook events newer than `after` (an event id), oldest first: the cursor for events_wait. */
+  eventsAfter(after: number) {
+    return this.db.prepare(`SELECT * FROM events WHERE id > ? ORDER BY id LIMIT 50`).all(after) as unknown as
+      { id: number; session: string; hook: string; status: Status; message: string | null; ts: number }[];
+  }
+
+  lastEventId() {
+    return (this.db.prepare(`SELECT COALESCE(MAX(id), 0) AS n FROM events`).get() as { n: number }).n;
+  }
+
   addJob(id: string, agent: string, task: string) {
     this.db.prepare(`INSERT INTO jobs (id, agent, task, status, started) VALUES (?, ?, ?, 'running', ?)`)
       .run(id, agent, task, Date.now());

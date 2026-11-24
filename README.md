@@ -26,17 +26,18 @@ Ask "how are my projects doing?" while you're away from the keyboard. Then start
                                           └───── hooks POST /events (Bearer EVENTS_TOKEN) ─────┘
 ```
 
-## Tools (25)
+## Tools (26)
 
 | Tool | What it does |
 | --- | --- |
 | `overview()` | One line per session, plus what is waiting on you. "How are my projects doing?" |
 | `events_pending()` | Sessions waiting for your input or approval, oldest first |
+| `events_wait(cursor?, session?, seconds=90)` | Long-poll: blocks until a session finishes a turn, needs you, or ends (pushed by the hooks), and returns what happened with the reply text. Pass the returned `cursor` back to keep listening without missing or repeating events |
 | `machine_list()` / `machine_status(machine)` | Reachability, session count, laptop power (AC or battery); CPU, RAM, disk, GPU/VRAM, link type, LLM endpoints |
 | `session_list(machine?)` | Status: `working`, `waiting_input`, `waiting_approval`, `idle` or `stopped` |
 | `session_start(project, machine?, prompt?, remote_control=true, name?, create?, repo?)` | Refreshes the shared context, then starts Claude Code in tmux in the project's own folder, named after the project (`cc-<project>`, then `cc-<project>-2`…). `create=true` registers a new project and gives it its own folder and git repo (or clones `repo`) |
 | `session_read(session, mode=reply\|summary\|tail)` | `reply` (default): the latest reply text, tools used and files changed, read from Claude Code's own transcript; or a short terminal status, or the cleaned terminal text |
-| `session_send(session, message, wait=45)` | Types a message, presses Enter, and waits for the reply in the same call |
+| `session_send(session, message, wait=90)` | Types a message, presses Enter, and waits for the reply in the same call (`wait=0` returns at once). A stopped session is woken first by resuming its conversation; a session waiting for approval is refused (use `session_approve`) |
 | `session_wait(session, seconds=60)` | Waits for a working session to finish its turn, then returns its reply |
 | `session_approve(session, yes\|no\|always, wait=30)` | Answers the menu on screen (tool permissions, trust dialogs) and waits for what happens next |
 | `session_interrupt(session)` / `session_stop(session, graceful\|kill, confirm?)` | Esc / `/exit`, or kill (kill needs `confirm=true`) |

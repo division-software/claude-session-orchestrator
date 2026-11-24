@@ -17,6 +17,7 @@ The Session Orchestrator tools reach the user's own machines through their own a
 - **"What has X done so far?"**: call `project_sessions` for the list of its sessions; the brain's `projects/<id>/log.md` has what each ended session did.
 - **"Tell X to ..."**: call `session_send` with the user's words. It waits for the reply (up to `wait` seconds) and returns it in the same call.
 - **A long task**: if a result says the session is still working, call `session_wait` and relay the reply when it comes, instead of reading repeatedly.
+- **Hear back without being asked**: after handing off work, call `events_wait` (pass back its `cursor` each time) and relay each reply or request as it arrives. `session_send` also wakes a stopped session.
 
 ## Permission prompts need the user's explicit decision
 

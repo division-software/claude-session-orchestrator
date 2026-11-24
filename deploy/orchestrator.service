@@ -8,6 +8,8 @@ User=orchestrator
 WorkingDirectory=/opt/session-orchestrator
 ExecStart=/usr/bin/node --env-file=.env src/server.ts
 Restart=on-failure
+# tmux servers may live in this cgroup; only kill node on restart, never the Claude sessions.
+KillMode=process
 StateDirectory=session-orchestrator
 
 [Install]

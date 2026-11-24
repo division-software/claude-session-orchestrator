@@ -26,8 +26,13 @@ export async function snapshot(m: Machine): Promise<TmuxSession[]> {
   }).filter((s) => SESSION_RE.test(s.name) && !seen.has(s.name) && !!seen.add(s.name));
 }
 
+// If no tmux server runs yet, start it in its own systemd scope: otherwise it lands in the caller's
+// cgroup (this service's), and restarting the service kills the server and every session on it.
+const OWN_SCOPE = 'if ! tmux ls >/dev/null 2>&1 && systemd-run --user --scope -q true 2>/dev/null; then ' +
+  'set -- systemd-run --user --scope -q --collect --unit=claude-tmux; fi; "$@" ';
+
 export const newSession = (m: Machine, name: string, dir: string, cmd: string) =>
-  runOk(m, `tmux new-session -d -s ${q(name)} -c ${qpath(dir)} ${q(cmd)}`);
+  runOk(m, `${OWN_SCOPE}tmux new-session -d -s ${q(name)} -c ${qpath(dir)} ${q(cmd)}`);
 
 /** Type literal text, then press Enter (separate call so text is never parsed as key names). */
 export async function sendText(m: Machine, name: string, text: string) {
