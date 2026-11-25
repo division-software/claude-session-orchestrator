@@ -2,7 +2,7 @@
 
 The same tools and `manage-sessions` skill as the hosted plugin, but the MCP server runs **on your own machine** (`npx -y claude-session-orchestrator stdio`). No hosted service, no sign-in. It works in Claude Code, Codex and Cursor, which all read this plugin format.
 
-> **Plugin not usable yet:** it launches the server from the npm package, which is not published. Until then, do step 1 (it ends with `install claude`, which registers the same server and skill) and skip step 2.
+> **Plugin not usable yet:** it launches the server from the npm package, which is not published. Until then, do step 1 (its `install claude` line which registers the same server and skill) and skip step 2.
 
 ## Setup
 
@@ -11,9 +11,9 @@ The same tools and `manage-sessions` skill as the hosted plugin, but the MCP ser
    git clone https://github.com/division-software/claude-session-orchestrator && cd claude-session-orchestrator
    npm ci && npm run build
    node dist/cli.js init                # config, tokens and this machine in ~/.config/session-orchestrator
+   node dist/cli.js install claude      # or codex, cursor, print: registers the server and skill without the plugin
    node dist/cli.js hooks local local   # status hooks, so the server knows when a session waits for you
    node dist/cli.js serve               # keep running (systemd/launchd) so the hooks have somewhere to report
-   node dist/cli.js install claude      # or codex, cursor, print: registers the server and skill without the plugin
    ```
 2. Install the plugin:
    ```
