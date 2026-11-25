@@ -58,14 +58,18 @@ Requirements: Node ≥ 24, plus `tmux`, `git` and Claude Code on each machine yo
 
 ### With the CLI (Claude Code, Codex, Cursor, any MCP client)
 
+The package is not on npm yet, so install from a checkout:
+
 ```sh
-npx claude-session-orchestrator init                 # ~/.config/session-orchestrator: this machine, tokens (0600), empty projects.yaml
-npx claude-session-orchestrator install claude       # or: codex, cursor, print (JSON for any other MCP client)
-npx claude-session-orchestrator hooks local local    # status hooks; for another machine: hooks me@gpu gpu http://hub:8787
-npx claude-session-orchestrator serve                # keep running (systemd/launchd) so hooks can report status
+git clone https://github.com/division-software/claude-session-orchestrator && cd claude-session-orchestrator
+npm ci && npm run build
+node dist/cli.js init                 # ~/.config/session-orchestrator: this machine, tokens (0600), empty projects.yaml
+node dist/cli.js install claude       # or: codex, cursor, print (JSON for any other MCP client)
+node dist/cli.js hooks local local    # status hooks; for another machine: hooks me@gpu gpu http://hub:8787
+node dist/cli.js serve                # keep running (systemd/launchd) so hooks can report status
 ```
 
-`install` registers the server over stdio and copies the `manage-sessions` skill (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex). Add more machines to `~/.config/session-orchestrator/machines.yaml`; projects are added by `session_start create=true` or by hand. `npm i -g claude-session-orchestrator` gives you the `session-orchestrator` command without `npx`. Set `ORCH_HOME` to keep the config somewhere else.
+`install` registers the server over stdio as `node <checkout>/dist/cli.js stdio` and copies the `manage-sessions` skill (`~/.claude/skills` for Claude Code, `~/.agents/skills` for Codex), so keep the checkout where it is. Add more machines to `~/.config/session-orchestrator/machines.yaml`; projects are added by `session_start create=true` or by hand. Set `ORCH_HOME` to keep the config somewhere else.
 
 ### As a plugin
 
@@ -75,7 +79,7 @@ npx claude-session-orchestrator serve                # keep running (systemd/lau
 /plugin install session-orchestrator@session-orchestrator         # hosted connector, see Hosted mode
 ```
 
-The self-hosted plugin still needs `init`, `hooks` and `serve` above, once.
+The hosted plugin works as is. The self-hosted plugin launches the server with `npx claude-session-orchestrator`, which needs the npm package and does not work until it is published; until then use `node dist/cli.js install claude` above, which registers the same server and skill.
 
 ### From a checkout
 
