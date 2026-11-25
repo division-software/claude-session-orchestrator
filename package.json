@@ -7,7 +7,7 @@
     "start": "node --env-file-if-exists=.env src/server.ts",
     "typecheck": "tsc",
     "build": "tsc -p tsconfig.build.json",
-    "prepack": "npm run build"
+    "prepare": "npm run build"
   },
   "license": "MIT",
   "type": "module",

@@ -2,7 +2,7 @@
   "mcpServers": {
     "session-orchestrator": {
       "command": "npx",
-      "args": ["-y", "claude-session-orchestrator", "stdio"]
+      "args": ["-y", "github:division-software/claude-session-orchestrator", "stdio"]
     }
   }
 }

@@ -79,7 +79,7 @@ node dist/cli.js serve                # keep running (systemd/launchd) so hooks 
 /plugin install session-orchestrator@session-orchestrator         # hosted connector, see Hosted mode
 ```
 
-The hosted plugin works as is. The self-hosted plugin launches the server with `npx claude-session-orchestrator`, which needs the npm package and does not work until it is published; until then use `node dist/cli.js install claude` above, which registers the same server and skill.
+The self-hosted plugin starts the server with `npx -y github:division-software/claude-session-orchestrator stdio` (built on first run, then cached). It still needs `init`, `hooks` and `serve` above, once.
 
 ### From a checkout
 
