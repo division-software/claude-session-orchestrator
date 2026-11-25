@@ -38,11 +38,11 @@
   ],
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/Nurhak/claude-session-orchestrator.git"
+    "url": "git+https://github.com/division-software/claude-session-orchestrator.git"
   },
-  "homepage": "https://github.com/Nurhak/claude-session-orchestrator#readme",
+  "homepage": "https://github.com/division-software/claude-session-orchestrator#readme",
   "bugs": {
-    "url": "https://github.com/Nurhak/claude-session-orchestrator/issues"
+    "url": "https://github.com/division-software/claude-session-orchestrator/issues"
   },
   "bin": {
     "session-orchestrator": "dist/cli.js"

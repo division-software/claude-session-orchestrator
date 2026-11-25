@@ -4,8 +4,8 @@
   "version": "0.3.0",
   "description": "Manage all your Claude Code sessions across your machines from one place. Runs the orchestrator on your own machine over stdio; nothing goes through a hosted service.",
   "author": { "name": "Nurhak", "url": "https://github.com/Nurhak" },
-  "homepage": "https://github.com/Nurhak/claude-session-orchestrator",
-  "repository": "https://github.com/Nurhak/claude-session-orchestrator",
+  "homepage": "https://github.com/division-software/claude-session-orchestrator",
+  "repository": "https://github.com/division-software/claude-session-orchestrator",
   "license": "MIT",
   "keywords": ["claude-code", "codex", "sessions", "tmux", "self-hosted"],
   "mcpServers": "./.mcp.json"

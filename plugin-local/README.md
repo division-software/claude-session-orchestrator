@@ -12,7 +12,7 @@ The same tools and `manage-sessions` skill as the hosted plugin, but the MCP ser
    ```
 2. Install the plugin:
    ```
-   /plugin marketplace add Nurhak/claude-session-orchestrator
+   /plugin marketplace add division-software/claude-session-orchestrator
    /plugin install session-orchestrator-local@session-orchestrator
    ```
 3. Ask: "Start a new project called side quest" or "How are my projects doing?"

@@ -20,7 +20,7 @@ The hosted service does not store tool arguments or results, and never sees your
 In Claude Code:
 
 ```
-/plugin install session-orchestrator --marketplace Nurhak/claude-session-orchestrator
+/plugin install session-orchestrator --marketplace division-software/claude-session-orchestrator
 ```
 
 In the Claude app, find Session Orchestrator in the directory once it is listed.
@@ -28,7 +28,7 @@ In the Claude app, find Session Orchestrator in the directory once it is listed.
 ## Setup
 
 1. Install this plugin and connect the Session Orchestrator connector. Sign in with GitHub or Google.
-2. Open the [dashboard](https://claude-session-orchestrator.nurhakaltin.workers.dev/dashboard), create an agent token, and follow the shown command to start the agent on your machine. Source and full documentation: [github.com/Nurhak/claude-session-orchestrator](https://github.com/Nurhak/claude-session-orchestrator).
+2. Open the [dashboard](https://claude-session-orchestrator.nurhakaltin.workers.dev/dashboard), create an agent token, and follow the shown command to start the agent on your machine. Source and full documentation: [github.com/division-software/claude-session-orchestrator](https://github.com/division-software/claude-session-orchestrator).
 3. Ask Claude: "How are my projects doing?"
 
 ## License

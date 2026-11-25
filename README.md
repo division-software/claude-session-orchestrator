@@ -70,7 +70,7 @@ npx claude-session-orchestrator serve                # keep running (systemd/lau
 ### As a plugin
 
 ```
-/plugin marketplace add Nurhak/claude-session-orchestrator
+/plugin marketplace add division-software/claude-session-orchestrator
 /plugin install session-orchestrator-local@session-orchestrator   # self-hosted, stdio; also loads in Codex and Cursor
 /plugin install session-orchestrator@session-orchestrator         # hosted connector, see Hosted mode
 ```
@@ -80,7 +80,7 @@ The self-hosted plugin still needs `init`, `hooks` and `serve` above, once.
 ### From a checkout
 
 ```sh
-git clone https://github.com/Nurhak/claude-session-orchestrator && cd claude-session-orchestrator
+git clone https://github.com/division-software/claude-session-orchestrator && cd claude-session-orchestrator
 npm ci
 cp config/machines.example.yaml config/machines.yaml   # your machines
 cp config/projects.example.yaml config/projects.yaml   # your projects and their spoken aliases
